@@ -1,0 +1,27 @@
+cat > .gitignore << EOF
+# 虛擬環境
+venv/
+.venv/
+env/
+ENV/
+
+# 環境變數
+.env
+.env.local
+.env.*.local
+
+# 其他常見忽略
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.vscode/
+.idea/
+*.swp
+*.swo
+
+venv/
+__pycache__/
+*.pyc
+EOF
