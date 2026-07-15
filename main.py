@@ -221,17 +221,6 @@ async def on_guild_remove(guild: discord.Guild):
 @bot.event
 async def on_ready():
     logger.info(f"機器人上線成功！登入身分: {bot.user}")
-    
-    # 👇👇👇 跑過一次後需要刪除的區塊開始 👇👇👇
-    logger.info("開始清理伺服器舊快取，準備消滅雙胞胎指令...")
-    for guild in bot.guilds:
-        bot.tree.clear_commands(guild=guild)
-        try:
-            await bot.tree.sync(guild=guild)
-        except Exception:
-            pass
-    logger.info("✅ 舊的伺服器專屬指令已清除！(確認指令無重複後，請將這個區塊刪除)")
-    # 👆👆👆 跑過一次後需要刪除的區塊結束 👆👆👆
 
     try:
         await bot.tree.sync()
