@@ -35,7 +35,8 @@ INITIAL_EXTENSIONS = [
     'cogs.admin',
     'cogs.cleaning',
     'cogs.finance',
-    'cogs.shopping'
+    'cogs.shopping',
+    'cogs.ai_agent'
 ]
 
 class RoommateBot(commands.Bot):
