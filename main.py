@@ -50,12 +50,15 @@ scheduler = AsyncIOScheduler(timezone=ZoneInfo("Asia/Taipei"))
 # 4. 核心事件處理
 @bot.event
 async def setup_hook():
+    # ✅ 已修正：使用正確的資料庫連線函數與設定檔
     await db.init_pool(config.DATABASE_URL)
-    # 載入所有指令模組
-    await bot.load_extension("cogs.roommate")
-    await bot.load_extension("cogs.finance")
+    
+    # ✅ 已修正：載入名稱與你實際資料夾內完全相符的模組
+    await bot.load_extension("cogs.admin")
     await bot.load_extension("cogs.cleaning")
-    await bot.load_extension("cogs.buy")
+    await bot.load_extension("cogs.finance")
+    await bot.load_extension("cogs.shopping")
+    
     # 啟動背景 Web 伺服器
     bot.loop.create_task(start_web_server())
 
@@ -69,7 +72,7 @@ async def on_ready():
         bot.tree.clear_commands(guild=guild)
         await bot.tree.sync(guild=guild)
     await bot.tree.sync()
-    logger.info("✅ 全域指令同步完成！(下次啟動前請將這段程式碼刪除)")
+    logger.info("✅ 全域指令同步完成！(解決指令重複問題，下次啟動前請將這段程式碼刪除)")
     # 👆👆👆 跑過一次後需要刪除的區塊結束 👆👆👆
 
     if not scheduler.running:
