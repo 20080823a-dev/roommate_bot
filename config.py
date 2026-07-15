@@ -25,7 +25,7 @@ HOME_GUILD_ID = int(os.getenv("HOME_GUILD_ID", "0"))
 MAX_GUILDS = int(os.getenv("MAX_GUILDS", "5"))
 
 # 單一租戶最大成員數限制
-MAX_ROOMMATES_PER_GUILD = int(os.getenv("MAX_ROOMMATES_PER_GUILD", "10"))
+MAX_ROOMMATES_PER_GUILD = int(os.getenv("MAX_ROOMMATES_PER_GUILD", "5"))
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 AI_CHANNEL_ID = int(os.getenv("AI_CHANNEL_ID", 0))
