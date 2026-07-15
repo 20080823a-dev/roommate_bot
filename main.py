@@ -50,7 +50,7 @@ scheduler = AsyncIOScheduler(timezone=ZoneInfo("Asia/Taipei"))
 # 4. 核心事件處理
 @bot.event
 async def setup_hook():
-    await db.init_db()
+    await db.init_pool(config.DATABASE_URL)
     # 載入所有指令模組
     await bot.load_extension("cogs.roommate")
     await bot.load_extension("cogs.finance")
