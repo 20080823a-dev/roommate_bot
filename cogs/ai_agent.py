@@ -10,7 +10,7 @@ import logging
 logger = logging.getLogger("bot.ai")
 
 # 建議使用的模型清單（由強到弱排序，當最強的模型失敗時會自動降級）
-FALLBACK_MODELS = ['gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-1.5-flash']
+FALLBACK_MODELS = ['gemini-3.5-flash', 'gemini-3-flash', 'gemini-2.5-flash', 'gemini-3.1-flash-lite, 'gemini-2.5-flash-lite']
 
 class AIActionConfirmView(discord.ui.View):
     def __init__(self, action_data: dict, guild_id: int):
