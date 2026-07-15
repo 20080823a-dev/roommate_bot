@@ -18,8 +18,10 @@ if config.GEMINI_API_KEY:
         # 1. 向 API 請求當前所有可用模型的清單
         available_models = []
         for m in genai.list_models():
-            # 2. 篩選：支援文字生成、屬於輕量快速的 flash 系列，且「排除」不穩定的實驗版(exp)
-            if 'generateContent' in m.supported_generation_methods and 'flash' in m.name.lower() and 'exp' not in m.name.lower():
+            if ('generateContent' in m.supported_generation_methods and 
+                'flash' in m.name.lower() and 
+                'exp' not in m.name.lower() and 
+                'omni' not in m.name.lower()):  
                 available_models.append(m.name)
         
         if available_models:
