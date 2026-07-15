@@ -41,8 +41,9 @@ INITIAL_EXTENSIONS = [
 
 class RoommateBot(commands.Bot):
     def __init__(self):
-        # ✅ 保持使用預設 Intents，不開啟敏感的 message_content 避免權限報錯
         intents = discord.Intents.default()
+        # ✅ 把讀取訊息內容的權限正式打開！
+        intents.message_content = True 
         super().__init__(command_prefix="!", intents=intents)
         self.scheduler = None
 
