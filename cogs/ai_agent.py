@@ -5,11 +5,38 @@ import json
 import re
 import config
 from database.db_manager import db
+import logging
 
-# 初始化 Gemini
+logger = logging.getLogger("bot.ai")
+
+# --- 自動抓取最新模型的動態初始化 ---
+model = None
 if config.GEMINI_API_KEY:
     genai.configure(api_key=config.GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-3.5-flash')
+    
+    try:
+        # 1. 向 API 請求當前所有可用模型的清單
+        available_models = []
+        for m in genai.list_models():
+            # 2. 篩選：支援文字生成、屬於輕量快速的 flash 系列，且「排除」不穩定的實驗版(exp)
+            if 'generateContent' in m.supported_generation_methods and 'flash' in m.name.lower() and 'exp' not in m.name.lower():
+                available_models.append(m.name)
+        
+        if available_models:
+            # 3. 依字母降序排列 (例如 gemini-3.0-flash 會排在 2.5 的前面)
+            available_models.sort(reverse=True)
+            
+            # 取第一筆最新模型，並去除 API 前綴的 'models/'
+            latest_model_name = available_models[0].replace('models/', '')
+            logger.info(f"🤖 成功動態加載最新 AI 模型: {latest_model_name}")
+            model = genai.GenerativeModel(latest_model_name)
+        else:
+            logger.warning("⚠️ 找不到符合條件的 flash 模型，退回使用預設值。")
+            model = genai.GenerativeModel('Gemini 2.5 Flash')
+            
+    except Exception as e:
+        logger.error(f"❌ 動態獲取模型清單失敗: {e}，改用預設模型。")
+        model = genai.GenerativeModel('Gemini 2.5 Flash')
 
 class AIActionConfirmView(discord.ui.View):
     def __init__(self, action_data: dict, guild_id: int):
