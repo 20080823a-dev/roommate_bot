@@ -16,25 +16,27 @@ if config.GEMINI_API_KEY:
     
     try:
         # 1. 向 API 請求當前所有可用模型的清單
+        # 1. 向 API 請求當前所有可用模型的清單
         available_models = []
         for m in genai.list_models():
-            if ('generateContent' in m.supported_generation_methods and 
-                'flash' in m.name.lower() and 
-                'exp' not in m.name.lower() and 
-                'omni' not in m.name.lower()):  
-                available_models.append(m.name)
+            model_name = m.name.replace('models/', '')
+            
+            # 2. 嚴格篩選：只抓取支援 generateContent，且名稱完全符合「gemini-數字.數字-flash」格式的模型
+            # 這樣會自動排除 lite, exp, omni, latest 等所有干擾項目
+            if 'generateContent' in m.supported_generation_methods and re.match(r'^gemini-\d+\.\d+-flash$', model_name):
+                available_models.append(model_name)
         
         if available_models:
-            # 3. 依字母降序排列 (例如 gemini-3.0-flash 會排在 2.5 的前面)
+            # 3. 依數字與字母降序排列 (例如 gemini-3.0-flash 會排在 gemini-2.5-flash 的前面)
             available_models.sort(reverse=True)
             
-            # 取第一筆最新模型，並去除 API 前綴的 'models/'
-            latest_model_name = available_models[0].replace('models/', '')
-            logger.info(f"🤖 成功動態加載最新 AI 模型: {latest_model_name}")
+            # 取第一筆最新模型
+            latest_model_name = available_models[0]
+            logger.info(f"🤖 成功動態加載最新 AI 穩定版模型: {latest_model_name}")
             model = genai.GenerativeModel(latest_model_name)
         else:
-            logger.warning("⚠️ 找不到符合條件的 flash 模型，退回使用預設值。")
-            model = genai.GenerativeModel('Gemini 2.5 Flash')
+            logger.warning("⚠️ 找不到符合標準版 flash 的模型，退回使用預設值。")
+            model = genai.GenerativeModel('gemini-2.5-flash')
             
     except Exception as e:
         logger.error(f"❌ 動態獲取模型清單失敗: {e}，改用預設模型。")
