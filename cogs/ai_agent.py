@@ -69,22 +69,22 @@ class AIAgentCog(commands.Cog):
         if message.author.bot or message.channel.id != config.AI_CHANNEL_ID:
             return
         if not config.GEMINI_API_KEY:
-            return await message.channel.send("⚠️ AI 尚未設定 API Key。")
+            return await message.channel.send("⚠️ AI 尚未設定金鑰。")
 
-        # 獲取室友名單
         rms = await db.fetch("SELECT user_id FROM roommates WHERE guild_id = $1", message.guild.id)
         roommate_info = "\n".join([f"姓名: {message.guild.get_member(r['user_id']).display_name}, ID: {r['user_id']}" for r in rms if message.guild.get_member(r['user_id'])])
 
         system_prompt = f"""
         你是一個精準的 Discord 室友生活助理。你的任務是判斷用戶的輸入是否需要執行「記帳指令」。
-        【目前群組內的室友名單與真實 ID】：{roommate_info}
+        【目前群組內的室友名單與真實 ID】：
+        {roommate_info}
         
         【重要規則】：
-        1. 若包含記帳意圖，嚴格輸出 JSON：{{"action": "expense", "title": "名稱", "amount": 數字, "payer_id": ID}}。
-        2. 若無意圖，直接用繁體中文閒聊。絕對不要包含任何 markdown 或其他符號。
+        1. 若用戶想記帳，請嚴格輸出 JSON：{{"action": "expense", "title": "名稱", "amount": 金額, "payer_id": ID}}
+        2. 若只是閒聊，請用自然的繁體中文回覆。
         """
 
-        # 設定五階段備援模型清單
+        # 設定你的降級模型優先順序 (Fallback List)
         fallback_models = [
             'gemini-3.5-flash', 
             'gemini-3.0-flash', 
@@ -92,30 +92,31 @@ class AIAgentCog(commands.Cog):
             'gemini-3.1-flash-lite', 
             'gemini-2.5-flash-lite'
         ]
-
+        
         async with message.channel.typing():
             reply = None
             for target_model in fallback_models:
                 try:
-                    # 使用系統層級指令隔離
-                    temp_model = genai.GenerativeModel(
+                    # 使用 system_instruction 隔離對話與規則
+                    model = genai.GenerativeModel(
                         model_name=target_model,
                         system_instruction=system_prompt
                     )
-                    response = temp_model.generate_content(
+                    
+                    response = model.generate_content(
                         message.content,
                         generation_config=genai.types.GenerationConfig(temperature=0.1)
                     )
                     reply = response.text.strip()
-                    break # 成功則跳出
+                    logger.info(f"✅ 使用模型 {target_model} 處理成功")
+                    break
                 except Exception as e:
-                    logger.warning(f"⚠️ {target_model} 失敗，嘗試下一順位... ({e})")
+                    logger.warning(f"⚠️ {target_model} 處理失敗，嘗試下一個: {e}")
                     continue
 
             if not reply:
-                return await message.reply("❌ AI 目前無法回應，請稍候再試。")
+                return await message.reply("❌ AI 資源忙碌中，請稍候重試。")
 
-            # 解析與 UI 互動
             json_str = re.sub(r'```json\n|\n```|```', '', reply).strip()
             try:
                 action_data = json.loads(json_str)
@@ -123,10 +124,12 @@ class AIAgentCog(commands.Cog):
                     embed = discord.Embed(title="🤖 AI 偵測到記帳指令", color=discord.Color.gold())
                     embed.add_field(name="項目", value=action_data['title'], inline=True)
                     embed.add_field(name="金額", value=f"${action_data['amount']}", inline=True)
+                    embed.add_field(name="墊款人", value=f"<@{action_data['payer_id']}>", inline=False)
+                    
                     view = AIActionConfirmView(action_data, message.guild.id)
                     await message.reply(embed=embed, view=view)
                     return
-            except json.JSONDecodeError:
+            except:
                 await message.reply(reply)
 
 async def setup(bot):
