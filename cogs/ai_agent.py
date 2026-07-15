@@ -112,39 +112,33 @@ class AIAgentCog(commands.Cog):
         4. 若只是普通的閒聊或問題，請直接用自然的繁體中文回覆他，不要輸出 JSON。
         """
 
+        # 建立你的「模型備用清單」(按聰明程度/優先度排序)
+        fallback_models = ['gemini-3.5-flash', 'gemini-3-flash', 'gemini-2.5-flash', 'gemini-3.1-flash-lite', 'gemini-2.5-flash-lite']
+        
         async with message.channel.typing():
-            try:
-                # 動態注入系統指令，徹底物理隔離「規則」與「對話」
-                temp_model = genai.GenerativeModel(
-                    model_name=model.model_name,
-                    system_instruction=system_prompt
-                )
-                
-                # 僅將用戶純淨的話語送入模型
-                response = temp_model.generate_content(
-                    message.content,
-                    generation_config=genai.types.GenerationConfig(temperature=0.1)
-                )
-                reply = response.text.strip()
-                
-                # 嘗試解析 JSON
-                json_str = re.sub(r'```json\n|\n```|```', '', reply).strip()
-                
+            reply = None
+            for target_model in fallback_models:
                 try:
-                    action_data = json.loads(json_str)
-                    if action_data.get("action") == "expense":
-                        payer_mention = f"<@{action_data['payer_id']}>"
-                        embed = discord.Embed(title="🤖 AI 偵測到記帳指令", description="請問是否要執行以下記帳？", color=discord.Color.gold())
-                        embed.add_field(name="項目", value=action_data['title'], inline=True)
-                        embed.add_field(name="金額", value=f"${action_data['amount']}", inline=True)
-                        embed.add_field(name="墊款人", value=payer_mention, inline=False)
-                        
-                        view = AIActionConfirmView(action_data, message.guild.id)
-                        await message.reply(embed=embed, view=view)
-                        return
-                except json.JSONDecodeError:
-                    # 不是 JSON，視為普通聊天
-                    await message.reply(reply)
+                    temp_model = genai.GenerativeModel(
+                        model_name=target_model,
+                        system_instruction=system_prompt
+                    )
+                    
+                    response = temp_model.generate_content(
+                        message.content,
+                        generation_config=genai.types.GenerationConfig(temperature=0.1)
+                    )
+                    reply = response.text.strip()
+                    logger.info(f"✅ 成功使用模型: {target_model} 完成任務")
+                    break  # 成功生成，立刻跳出迴圈！
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ {target_model} 失敗或額度用盡，自動切換下一個模型... ({e})")
+                    continue  # 遇到錯誤，無縫接軌換下一個模型嘗試
+                    
+            # 如果迴圈跑完，reply 還是 None，代表所有模型都死光了
+            if not reply:
+                return await message.reply("❌ 糟糕，所有 AI 模型的免費額度都已耗盡，請稍後再試！")
 
             except Exception as e:
                 await message.reply(f"❌ AI 腦袋卡住了：{e}")
