@@ -16,21 +16,16 @@ if config.GEMINI_API_KEY:
     
     try:
         # 1. 向 API 請求當前所有可用模型的清單
-        # 1. 向 API 請求當前所有可用模型的清單
         available_models = []
         for m in genai.list_models():
             model_name = m.name.replace('models/', '')
-            
             # 2. 嚴格篩選：只抓取支援 generateContent，且名稱完全符合「gemini-數字.數字-flash」格式的模型
-            # 這樣會自動排除 lite, exp, omni, latest 等所有干擾項目
             if 'generateContent' in m.supported_generation_methods and re.match(r'^gemini-\d+\.\d+-flash$', model_name):
                 available_models.append(model_name)
         
         if available_models:
-            # 3. 依數字與字母降序排列 (例如 gemini-3.0-flash 會排在 gemini-2.5-flash 的前面)
+            # 3. 依字母與數字降序排列
             available_models.sort(reverse=True)
-            
-            # 取第一筆最新模型
             latest_model_name = available_models[0]
             logger.info(f"🤖 成功動態加載最新 AI 穩定版模型: {latest_model_name}")
             model = genai.GenerativeModel(latest_model_name)
@@ -40,7 +35,7 @@ if config.GEMINI_API_KEY:
             
     except Exception as e:
         logger.error(f"❌ 動態獲取模型清單失敗: {e}，改用預設模型。")
-        model = genai.GenerativeModel('Gemini 2.5 Flash')
+        model = genai.GenerativeModel('gemini-2.5-flash')
 
 class AIActionConfirmView(discord.ui.View):
     def __init__(self, action_data: dict, guild_id: int):
@@ -52,13 +47,11 @@ class AIActionConfirmView(discord.ui.View):
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         
-        # 根據 AI 判斷的 action 執行對應的資料庫操作
         if self.action_data['action'] == 'expense':
             title = self.action_data['title']
             amount = self.action_data['amount']
             payer_id = self.action_data['payer_id']
             
-            # 獲取室友名單來分攤
             rms = await db.fetch("SELECT user_id FROM roommates WHERE guild_id = $1", self.guild_id)
             participating_rms = [r['user_id'] for r in rms]
             
@@ -80,7 +73,6 @@ class AIActionConfirmView(discord.ui.View):
                         )
             await interaction.followup.send(f"🎉 已成功記帳：{title} (${amount})！")
             
-        # 執行完畢後禁用按鈕
         for child in self.children:
             child.disabled = True
         await interaction.message.edit(view=self)
@@ -91,22 +83,23 @@ class AIActionConfirmView(discord.ui.View):
             child.disabled = True
         await interaction.response.edit_message(content="🚫 已取消該操作。", view=self)
 
+
 class AIAgentCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        # 排除機器人自己的訊息與非 AI 頻道的訊息
         if message.author.bot or message.channel.id != config.AI_CHANNEL_ID:
             return
-        if not config.GEMINI_API_KEY:
-            return await message.channel.send("⚠️ 尚未設定 Gemini API Key。")
+        if not config.GEMINI_API_KEY or not model:
+            return await message.channel.send("⚠️ AI 尚未準備就緒或未設定金鑰。")
 
-        # 獲取當前伺服器的室友名單，注入給 AI 防止認錯人
+        # 獲取室友名單
         rms = await db.fetch("SELECT user_id FROM roommates WHERE guild_id = $1", message.guild.id)
         roommate_info = "\n".join([f"姓名: {message.guild.get_member(r['user_id']).display_name}, ID: {r['user_id']}" for r in rms if message.guild.get_member(r['user_id'])])
 
+        # 系統核心指令
         system_prompt = f"""
         你是一個精準的 Discord 室友生活助理。你的任務是判斷用戶的輸入是否需要執行「記帳指令」。
         【目前群組內的室友名單與真實 ID】：
@@ -121,14 +114,20 @@ class AIAgentCog(commands.Cog):
 
         async with message.channel.typing():
             try:
-                response = model.generate_content(
-                    f"{system_prompt}\n\n用戶說：{message.content}",
-                    generation_config=genai.types.GenerationConfig(temperature=0.1) # 溫度設極低，降低幻覺
+                # 動態注入系統指令，徹底物理隔離「規則」與「對話」
+                temp_model = genai.GenerativeModel(
+                    model_name=model.model_name,
+                    system_instruction=system_prompt
+                )
+                
+                # 僅將用戶純淨的話語送入模型
+                response = temp_model.generate_content(
+                    message.content,
+                    generation_config=genai.types.GenerationConfig(temperature=0.1)
                 )
                 reply = response.text.strip()
                 
-                # 嘗試解析是否為嚴格的 JSON 動作指令
-                # 簡單正則處理，去掉可能被加上去的 ```json ``` 標籤
+                # 嘗試解析 JSON
                 json_str = re.sub(r'```json\n|\n```|```', '', reply).strip()
                 
                 try:
@@ -144,7 +143,7 @@ class AIAgentCog(commands.Cog):
                         await message.reply(embed=embed, view=view)
                         return
                 except json.JSONDecodeError:
-                    # 如果不是 JSON，代表是普通聊天，直接回覆
+                    # 不是 JSON，視為普通聊天
                     await message.reply(reply)
 
             except Exception as e:
