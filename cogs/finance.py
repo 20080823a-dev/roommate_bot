@@ -1,4 +1,4 @@
-# cogs/finance.py
+# cogs/finance.py (更新版)
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -12,67 +12,47 @@ class FinanceCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
     
+    # 💡 核心優化：Cog 級別錯誤攔截器
+    async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        # 記錄錯誤到日誌供後台查看
+        print(f"指令錯誤: {error}") 
+        
+        err_msg = f"❌ 指令執行失敗：{error}"
+        if not interaction.response.is_done():
+            await interaction.response.send_message(err_msg, ephemeral=True)
+        else:
+            await interaction.followup.send(err_msg, ephemeral=True)
+
     finance = app_commands.Group(name="finance", description="記帳與費用分攤指令")
 
     @finance.command(name="expense", description="新增分攤消費 (僅由標記的人平分)")
-    @app_commands.describe(
-        title="消費名稱", 
-        amount="總金額", 
-        participants="請標記所有要平分的人 (例如: @A @B)",
-        payer="代墊人 (預設為指令發起人)"
-    )
-    async def expense(
-        self, 
-        interaction: discord.Interaction, 
-        title: str, 
-        amount: int, 
-        participants: str,
-        payer: discord.Member = None
-    ):
+    async def expense(self, interaction: discord.Interaction, title: str, amount: int, participants: str, payer: discord.Member = None):
         await interaction.response.defer(ephemeral=False)
         
-        # 🛡️ 防呆 1：金額檢查
         if amount <= 0:
-            return await interaction.followup.send(embed=discord.Embed(description="❌ 錯誤：金額必須大於 0！", color=discord.Color.red()))
+            raise ValueError("金額必須大於 0")
             
-        gid = interaction.guild_id
         payer_id = payer.id if payer else interaction.user.id
-        
-        # 1. 萃取字串中的所有 Discord ID，並去除重複
         tagged_ids = [int(uid) for uid in re.findall(r'<@!?(\d+)>', participants)]
         participating_rms = list(set(tagged_ids)) 
         
-        # 🛡️ 防呆 2：人數檢查
         if not participating_rms:
-            return await interaction.followup.send(embed=discord.Embed(description="❌ 錯誤：請在 participants 欄位中 @標記 至少一位成員！", color=discord.Color.red()))
-        if len(participating_rms) == 1 and participating_rms[0] == payer_id:
-            return await interaction.followup.send(embed=discord.Embed(description="❌ 錯誤：不能只有代墊人自己一個人分攤！", color=discord.Color.red()))
-
+            raise ValueError("請 @標記 至少一位參與平分的人")
+            
         split = amount // len(participating_rms)
         
-        # 2. 寫入資料庫 (加上 try-except 保護)
-        try:
-            async with db.transaction() as conn:
-                eid = await conn.fetchval(
-                    "INSERT INTO expense_events (guild_id, description, total_amount, created_by) VALUES ($1, $2, $3, $4) RETURNING id",
-                    gid, title, amount, interaction.user.id
-                )
-                for uid in participating_rms:
-                    if uid != payer_id:
-                        await conn.execute(
-                            "INSERT INTO ledger (guild_id, event_id, debtor_id, creditor_id, amount) VALUES ($1, $2, $3, $4, $5)",
-                            gid, eid, uid, payer_id, split
-                        )
-            
-            embed = discord.Embed(title="🧾 新增消費成功", color=discord.Color.green())
-            embed.add_field(name="項目", value=title, inline=True)
-            embed.add_field(name="總金額", value=f"${amount}", inline=True)
-            embed.add_field(name="代墊人", value=f"<@{payer_id}>", inline=False)
-            embed.add_field(name="分攤結果", value=f"共 {len(participating_rms)} 人參與平分，其他人各需給付代墊人 **${split}**", inline=False)
-            await interaction.followup.send(embed=embed)
-            
-        except Exception as e:
-            await interaction.followup.send(embed=discord.Embed(description=f"❌ 資料庫寫入失敗，請聯絡管理員：{e}", color=discord.Color.red()))
+        async with db.transaction() as conn:
+            eid = await conn.fetchval(
+                "INSERT INTO expense_events (guild_id, description, total_amount, created_by) VALUES ($1, $2, $3, $4) RETURNING id",
+                interaction.guild_id, title, amount, interaction.user.id
+            )
+            for uid in participating_rms:
+                if uid != payer_id:
+                    await conn.execute(
+                        "INSERT INTO ledger (guild_id, event_id, debtor_id, creditor_id, amount) VALUES ($1, $2, $3, $4, $5)",
+                        interaction.guild_id, eid, uid, payer_id, split
+                    )
+        await interaction.followup.send(f"✅ 已成功記帳：{title} (${amount})")
 
     @finance.command(name="pay", description="資金轉交 (還錢給墊款人)")
     @app_commands.describe(payer="付錢的人", payee="收錢的人", amount="金額")
