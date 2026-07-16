@@ -21,6 +21,13 @@ class FinanceCog(commands.Cog):
         participants="請標記所有要平分的人 (例如: @A @B)",
         payer="代墊人 (預設為指令發起人)"
     )
+    @finance.command(name="expense", description="新增分攤消費 (僅由標記的人平分)")
+    @app_commands.describe(
+        title="消費名稱", 
+        amount="總金額", 
+        participants="請標記所有要平分的人 (例如: @A @B)",
+        payer="代墊人 (預設為指令發起人)"
+    )
     async def expense(
         self, 
         interaction: discord.Interaction, 
@@ -30,6 +37,11 @@ class FinanceCog(commands.Cog):
         payer: discord.Member = None
     ):
         await interaction.response.defer(ephemeral=False)
+        
+        # 🛡️ 防呆 1：金額檢查
+        if amount <= 0:
+            return await interaction.followup.send(embed=discord.Embed(description="❌ 錯誤：金額必須大於 0！", color=discord.Color.red()))
+            
         gid = interaction.guild_id
         payer_id = payer.id if payer else interaction.user.id
         
@@ -37,30 +49,37 @@ class FinanceCog(commands.Cog):
         tagged_ids = [int(uid) for uid in re.findall(r'<@!?(\d+)>', participants)]
         participating_rms = list(set(tagged_ids)) 
         
+        # 🛡️ 防呆 2：人數檢查
         if not participating_rms:
             return await interaction.followup.send(embed=discord.Embed(description="❌ 錯誤：請在 participants 欄位中 @標記 至少一位成員！", color=discord.Color.red()))
+        if len(participating_rms) == 1 and participating_rms[0] == payer_id:
+            return await interaction.followup.send(embed=discord.Embed(description="❌ 錯誤：不能只有代墊人自己一個人分攤！", color=discord.Color.red()))
 
         split = amount // len(participating_rms)
         
-        # 2. 寫入資料庫
-        async with db.transaction() as conn:
-            eid = await conn.fetchval(
-                "INSERT INTO expense_events (guild_id, description, total_amount, created_by) VALUES ($1, $2, $3, $4) RETURNING id",
-                gid, title, amount, interaction.user.id
-            )
-            for uid in participating_rms:
-                if uid != payer_id:
-                    await conn.execute(
-                        "INSERT INTO ledger (guild_id, event_id, debtor_id, creditor_id, amount) VALUES ($1, $2, $3, $4, $5)",
-                        gid, eid, uid, payer_id, split
-                    )
-        
-        embed = discord.Embed(title="🧾 新增消費成功", color=discord.Color.green())
-        embed.add_field(name="項目", value=title, inline=True)
-        embed.add_field(name="總金額", value=f"${amount}", inline=True)
-        embed.add_field(name="代墊人", value=f"<@{payer_id}>", inline=False)
-        embed.add_field(name="分攤結果", value=f"共 {len(participating_rms)} 人參與平分，其他人各需給付代墊人 **${split}**", inline=False)
-        await interaction.followup.send(embed=embed)
+        # 2. 寫入資料庫 (加上 try-except 保護)
+        try:
+            async with db.transaction() as conn:
+                eid = await conn.fetchval(
+                    "INSERT INTO expense_events (guild_id, description, total_amount, created_by) VALUES ($1, $2, $3, $4) RETURNING id",
+                    gid, title, amount, interaction.user.id
+                )
+                for uid in participating_rms:
+                    if uid != payer_id:
+                        await conn.execute(
+                            "INSERT INTO ledger (guild_id, event_id, debtor_id, creditor_id, amount) VALUES ($1, $2, $3, $4, $5)",
+                            gid, eid, uid, payer_id, split
+                        )
+            
+            embed = discord.Embed(title="🧾 新增消費成功", color=discord.Color.green())
+            embed.add_field(name="項目", value=title, inline=True)
+            embed.add_field(name="總金額", value=f"${amount}", inline=True)
+            embed.add_field(name="代墊人", value=f"<@{payer_id}>", inline=False)
+            embed.add_field(name="分攤結果", value=f"共 {len(participating_rms)} 人參與平分，其他人各需給付代墊人 **${split}**", inline=False)
+            await interaction.followup.send(embed=embed)
+            
+        except Exception as e:
+            await interaction.followup.send(embed=discord.Embed(description=f"❌ 資料庫寫入失敗，請聯絡管理員：{e}", color=discord.Color.red()))
 
     @finance.command(name="pay", description="資金轉交 (還錢給墊款人)")
     @app_commands.describe(payer="付錢的人", payee="收錢的人", amount="金額")
