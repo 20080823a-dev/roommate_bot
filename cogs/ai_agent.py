@@ -26,7 +26,11 @@ class AIActionConfirmView(discord.ui.View):
             # 💡 【情況 1：一般墊款均分】
             if self.action_data['action'] == 'expense':
                 title = self.action_data['title']
-                amount = self.action_data['amount']
+                amount = int(self.action_data.get('amount', 0))
+                
+                # 🛡️ 防呆：金額不得小於等於 0
+                if amount <= 0:
+                    return await interaction.followup.send("❌ 記帳失敗：金額必須大於 0！")
                 
                 payer_id = self.action_data.get('payer_id')
                 if not payer_id or str(payer_id).lower() == "none":
@@ -34,57 +38,79 @@ class AIActionConfirmView(discord.ui.View):
                 else:
                     payer_id = int(payer_id)
                 
-                rms = await db.fetch("SELECT user_id FROM roommates WHERE guild_id = $1", self.guild_id)
-                participating_rms = [r['user_id'] for r in rms]
+                # 🛡️ 判斷是「全體平分」還是「指定平分」，並清洗 ID 型別
+                raw_participants = self.action_data.get('participants', [])
+                if not raw_participants:
+                    # 空陣列代表全體平分
+                    rms = await db.fetch("SELECT user_id FROM roommates WHERE guild_id = $1", self.guild_id)
+                    participating_rms = [r['user_id'] for r in rms]
+                else:
+                    # 清洗 AI 傳來的陣列，確保全是整數
+                    participating_rms = []
+                    for uid in raw_participants:
+                        try: participating_rms.append(int(uid))
+                        except: pass
+                    participating_rms = list(set(participating_rms)) # 去除重複
                 
+                # 🛡️ 防呆：檢查分攤人數
                 if not participating_rms:
-                    return await interaction.followup.send("❌ 找不到室友名單。")
+                    return await interaction.followup.send("❌ 記帳失敗：找不到可以分攤的室友名單。")
+                if len(participating_rms) == 1 and participating_rms[0] == payer_id:
+                    return await interaction.followup.send("❌ 記帳失敗：不能只有代墊人自己一個人分攤！")
                     
                 split = amount // len(participating_rms)
                 
-                async with db.transaction() as conn:
-                    eid = await conn.fetchval(
-                        "INSERT INTO expense_events (guild_id, description, total_amount, created_by) VALUES ($1, $2, $3, $4) RETURNING id",
-                        self.guild_id, title, amount, interaction.user.id
-                    )
-                    for uid in participating_rms:
-                        if uid != payer_id:
-                            await conn.execute(
-                                "INSERT INTO ledger (guild_id, event_id, debtor_id, creditor_id, amount) VALUES ($1, $2, $3, $4, $5)",
-                                self.guild_id, eid, uid, payer_id, split
-                            )
-                await interaction.followup.send(f"🎉 已成功記帳：{title} (${amount})！")
+                # 🛡️ 加入資料庫異常攔截網
+                try:
+                    async with db.transaction() as conn:
+                        eid = await conn.fetchval(
+                            "INSERT INTO expense_events (guild_id, description, total_amount, created_by) VALUES ($1, $2, $3, $4) RETURNING id",
+                            self.guild_id, title, amount, interaction.user.id
+                        )
+                        for uid in participating_rms:
+                            if uid != payer_id:
+                                await conn.execute(
+                                    "INSERT INTO ledger (guild_id, event_id, debtor_id, creditor_id, amount) VALUES ($1, $2, $3, $4, $5)",
+                                    self.guild_id, eid, uid, payer_id, split
+                                )
+                    await interaction.followup.send(f"🎉 已成功記帳：{title} (${amount})，共 {len(participating_rms)} 人平分！")
+                except Exception as db_err:
+                    return await interaction.followup.send(f"❌ 資料庫寫入失敗：{db_err}")
             
             # 💡 【情況 2：A 還款給 B】
             elif self.action_data['action'] == 'repay':
-                amount = self.action_data['amount']
+                amount = int(self.action_data.get('amount', 0))
+                if amount <= 0:
+                    return await interaction.followup.send("❌ 還款失敗：金額必須大於 0！")
+                    
                 payer_id = self.action_data.get('payer_id')
                 receiver_id = self.action_data.get('receiver_id')
 
-                # 防呆強制轉整數
                 try: payer_id = int(payer_id)
                 except: payer_id = interaction.user.id
                 try: receiver_id = int(receiver_id)
                 except: receiver_id = interaction.user.id
 
-                async with db.transaction() as conn:
-                    eid = await conn.fetchval(
-                        "INSERT INTO expense_events (guild_id, description, total_amount, created_by) VALUES ($1, $2, $3, $4) RETURNING id",
-                        self.guild_id, "還款/結清", amount, interaction.user.id
-                    )
-                    # 還款邏輯：收錢的人 (receiver) 欠 付錢的人 (payer)，以此抵銷原本的債務
-                    await conn.execute(
-                        "INSERT INTO ledger (guild_id, event_id, debtor_id, creditor_id, amount) VALUES ($1, $2, $3, $4, $5)",
-                        self.guild_id, eid, receiver_id, payer_id, amount
-                    )
-                await interaction.followup.send(f"💸 已成功記錄還款：<@{payer_id}> 還給 <@{receiver_id}> ${amount}！")
+                try:
+                    async with db.transaction() as conn:
+                        eid = await conn.fetchval(
+                            "INSERT INTO expense_events (guild_id, description, total_amount, created_by) VALUES ($1, $2, $3, $4) RETURNING id",
+                            self.guild_id, "還款/結清", amount, interaction.user.id
+                        )
+                        await conn.execute(
+                            "INSERT INTO ledger (guild_id, event_id, debtor_id, creditor_id, amount) VALUES ($1, $2, $3, $4, $5)",
+                            self.guild_id, eid, receiver_id, payer_id, amount
+                        )
+                    await interaction.followup.send(f"💸 已成功記錄還款：<@{payer_id}> 還給 <@{receiver_id}> ${amount}！")
+                except Exception as db_err:
+                    return await interaction.followup.send(f"❌ 資料庫還款寫入失敗：{db_err}")
                 
             for child in self.children:
                 child.disabled = True
             await interaction.message.edit(view=self)
             
         except Exception as e:
-            await interaction.followup.send(f"❌ 寫入資料庫失敗：{e}")
+            await interaction.followup.send(f"❌ 發生未預期的系統錯誤：{e}")
 
     @discord.ui.button(label="❌ 取消", style=discord.ButtonStyle.red)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
