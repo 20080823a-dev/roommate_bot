@@ -89,7 +89,8 @@ class RoommateBot(commands.Bot):
         app.router.add_get('/', self.handle_ping)
         runner = web.AppRunner(app)
         await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', config.PORT)
+        port = int(os.environ.get("PORT", 8080))
+        site = web.TCPSite(runner, '0.0.0.0', port)
         await site.start()
         logger.info(f"Web Server 已成功監聽連接埠: {config.PORT}")
 
