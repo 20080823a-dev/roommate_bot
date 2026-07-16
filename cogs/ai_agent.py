@@ -1,3 +1,4 @@
+# cogs/ai_agent.py
 import discord
 from discord.ext import commands
 import google.generativeai as genai
@@ -23,12 +24,10 @@ class AIActionConfirmView(discord.ui.View):
         await interaction.response.defer()
         
         try:
-            # 💡 【情況 1：一般墊款均分】
             if self.action_data['action'] == 'expense':
                 title = self.action_data['title']
                 amount = int(self.action_data.get('amount', 0))
                 
-                # 🛡️ 防呆：金額不得小於等於 0
                 if amount <= 0:
                     return await interaction.followup.send("❌ 記帳失敗：金額必須大於 0！")
                 
@@ -38,21 +37,17 @@ class AIActionConfirmView(discord.ui.View):
                 else:
                     payer_id = int(payer_id)
                 
-                # 🛡️ 判斷是「全體平分」還是「指定平分」，並清洗 ID 型別
                 raw_participants = self.action_data.get('participants', [])
                 if not raw_participants:
-                    # 空陣列代表全體平分
                     rms = await db.fetch("SELECT user_id FROM roommates WHERE guild_id = $1", self.guild_id)
                     participating_rms = [r['user_id'] for r in rms]
                 else:
-                    # 清洗 AI 傳來的陣列，確保全是整數
                     participating_rms = []
                     for uid in raw_participants:
                         try: participating_rms.append(int(uid))
                         except: pass
-                    participating_rms = list(set(participating_rms)) # 去除重複
+                    participating_rms = list(set(participating_rms)) 
                 
-                # 🛡️ 防呆：檢查分攤人數
                 if not participating_rms:
                     return await interaction.followup.send("❌ 記帳失敗：找不到可以分攤的室友名單。")
                 if len(participating_rms) == 1 and participating_rms[0] == payer_id:
@@ -60,7 +55,6 @@ class AIActionConfirmView(discord.ui.View):
                     
                 split = amount // len(participating_rms)
                 
-                # 🛡️ 加入資料庫異常攔截網
                 try:
                     async with db.transaction() as conn:
                         eid = await conn.fetchval(
@@ -77,7 +71,6 @@ class AIActionConfirmView(discord.ui.View):
                 except Exception as db_err:
                     return await interaction.followup.send(f"❌ 資料庫寫入失敗：{db_err}")
             
-            # 💡 【情況 2：A 還款給 B】
             elif self.action_data['action'] == 'repay':
                 amount = int(self.action_data.get('amount', 0))
                 if amount <= 0:
@@ -104,6 +97,18 @@ class AIActionConfirmView(discord.ui.View):
                     await interaction.followup.send(f"💸 已成功記錄還款：<@{payer_id}> 還給 <@{receiver_id}> ${amount}！")
                 except Exception as db_err:
                     return await interaction.followup.send(f"❌ 資料庫還款寫入失敗：{db_err}")
+
+            elif self.action_data['action'] == 'shopping':
+                item = self.action_data['item']
+                try:
+                    async with db.transaction() as conn:
+                        await conn.execute(
+                            "INSERT INTO shopping_list (guild_id, item_name, added_by) VALUES ($1, $2, $3)",
+                            self.guild_id, item, interaction.user.id
+                        )
+                    await interaction.followup.send(f"🛒 已成功將 **{item}** 加入採購清單！")
+                except Exception as db_err:
+                    await interaction.followup.send(f"❌ 採購清單寫入失敗：{db_err}")
                 
             for child in self.children:
                 child.disabled = True
@@ -131,11 +136,10 @@ class AIAgentCog(commands.Cog):
             return await message.channel.send("⚠️ AI 尚未準備就緒或未設定金鑰。")
 
         rms = await db.fetch("SELECT user_id FROM roommates WHERE guild_id = $1", message.guild.id)
-        roommate_info = "\n".join([f"姓名: {message.guild.get_member(r['user_id']).display_name}, ID: {r['user_id']}" for r in rms if message.guild.get_member(r['user_id'])])
+        roommate_info = "\n".join([f"姓名: {message.guild.get_member(r['user_id']).display_name if message.guild.get_member(r['user_id']) else r['user_id']}, ID: {r['user_id']}" for r in rms])
 
-        # 💡 升級版系統指令：加入指定平分陣列與防呆
         system_prompt = f"""
-        你是一個精準的 Discord 室友生活助理。你的任務是判斷用戶的輸入是否需要執行「記帳指令」或「還款指令」。
+        你是一個精準的 Discord 室友生活助理。你的任務是判斷用戶的輸入是否需要執行「記帳指令」、「還款指令」或「採購指令」。
         【目前群組內的室友名單與真實 ID】：
         {roommate_info}
         發話者 (用戶自己) 的真實 ID 是: {message.author.id}
@@ -148,14 +152,15 @@ class AIAgentCog(commands.Cog):
            * ⚠️ 如果用戶說「幫大家/所有人」墊錢，或「沒有」特別標記誰，請將 participants 保持為空陣列 []。
         3. 【還款 / 給錢】：如果是 A 還錢給 B (例如「@軒 還我 500」)，回傳 JSON：
            {{"action": "repay", "amount": 總金額整數, "payer_id": 付錢方(還款人)的真實ID, "receiver_id": 收錢方的真實ID}}
-        4. 嚴格輸出純 JSON，不可有其他文字與 markdown 符號。若是閒聊則自然回覆中文，不要輸出 JSON。
+        4. 【採購清單】：如果用戶想要買東西或將物品加入採買清單 (例如「我要買衛生紙5串」)，回傳 JSON：
+           {{"action": "shopping", "item": "物品名稱與數量(如:衛生紙5串)"}}
+        5. 嚴格輸出純 JSON，不可有其他文字與 markdown 符號。若是閒聊則自然回覆中文，不要輸出 JSON。
         """
 
         fallback_models = [
-            'gemini-3.5-flash',
-            'gemini-3-flash',
-            'gemini-2.5-flash',
             'gemini-3.1-flash-lite',
+            'gemini-3.5-flash',
+            'gemini-2.5-flash',
             'gemini-2.5-flash-lite'
         ]
 
@@ -167,34 +172,31 @@ class AIAgentCog(commands.Cog):
                         model_name=target_model,
                         system_instruction=system_prompt
                     )
-                    
                     response = temp_model.generate_content(
                         message.content,
                         generation_config=genai.types.GenerationConfig(temperature=0.1)
                     )
                     reply = response.text.strip()
                     break
-                    
                 except Exception as e:
                     logger.warning(f"⚠️ {target_model} 失敗: {e}")
                     continue
                     
             if not reply:
-                return await message.reply("❌ AI 發生錯誤，請稍後再試！")
+                return await message.reply("❌ AI 發生錯誤，所有備用模型均已達到限制，請稍後再試！")
                 
             json_str = re.sub(r'```json\n|\n```|```', '', reply).strip()
             
             try:
                 action_data = json.loads(json_str)
                 
-                # 介面顯示 1：一般均分
                 if action_data.get("action") == "expense":
                     payer_id = action_data.get('payer_id')
                     if not payer_id or str(payer_id).lower() == "none":
                         payer_id = message.author.id
                         action_data['payer_id'] = payer_id
                         
-                    embed = discord.Embed(title="🤖 AI 偵測到均分記帳", description="請問是否要執行以下記帳？", color=discord.Color.gold())
+                    embed = discord.Embed(title="🤖 AI 偵測到記帳需求", description="請問是否要執行以下記帳？", color=discord.Color.gold())
                     embed.add_field(name="項目", value=action_data['title'], inline=True)
                     embed.add_field(name="金額", value=f"${action_data['amount']}", inline=True)
                     embed.add_field(name="墊款人", value=f"<@{action_data['payer_id']}>", inline=False)
@@ -203,7 +205,6 @@ class AIAgentCog(commands.Cog):
                     await message.reply(embed=embed, view=view)
                     return
                 
-                # 介面顯示 2：還款結清
                 elif action_data.get("action") == "repay":
                     payer_id = action_data.get('payer_id')
                     receiver_id = action_data.get('receiver_id')
@@ -218,6 +219,14 @@ class AIAgentCog(commands.Cog):
                     embed.add_field(name="金額", value=f"${action_data['amount']}", inline=False)
                     embed.add_field(name="還款人 (付錢方)", value=f"<@{action_data['payer_id']}>", inline=True)
                     embed.add_field(name="收款人 (收錢方)", value=f"<@{action_data['receiver_id']}>", inline=True)
+                    
+                    view = AIActionConfirmView(action_data, message.guild.id)
+                    await message.reply(embed=embed, view=view)
+                    return
+
+                elif action_data.get("action") == "shopping":
+                    embed = discord.Embed(title="🛒 AI 偵測到採購需求", description="請問是否加入採購清單？", color=discord.Color.blue())
+                    embed.add_field(name="採買項目", value=action_data['item'], inline=False)
                     
                     view = AIActionConfirmView(action_data, message.guild.id)
                     await message.reply(embed=embed, view=view)
