@@ -23,35 +23,44 @@ class AIActionConfirmView(discord.ui.View):
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         
-        if self.action_data['action'] == 'expense':
-            title = self.action_data['title']
-            amount = self.action_data['amount']
-            payer_id = self.action_data['payer_id']
-            
-            rms = await db.fetch("SELECT user_id FROM roommates WHERE guild_id = $1", self.guild_id)
-            participating_rms = [r['user_id'] for r in rms]
-            
-            if not participating_rms:
-                return await interaction.followup.send("❌ 找不到室友名單。")
+        try:
+            if self.action_data['action'] == 'expense':
+                title = self.action_data['title']
+                amount = self.action_data['amount']
                 
-            split = amount // len(participating_rms)
+                # 🛡️ 防呆機制：如果 AI 沒給 ID，預設為點擊按鈕的使用者
+                payer_id = self.action_data.get('payer_id')
+                if not payer_id or payer_id == "None":
+                    payer_id = interaction.user.id
+                
+                rms = await db.fetch("SELECT user_id FROM roommates WHERE guild_id = $1", self.guild_id)
+                participating_rms = [r['user_id'] for r in rms]
+                
+                if not participating_rms:
+                    return await interaction.followup.send("❌ 找不到室友名單。")
+                    
+                split = amount // len(participating_rms)
+                
+                async with db.transaction() as conn:
+                    eid = await conn.fetchval(
+                        "INSERT INTO expense_events (guild_id, description, total_amount, created_by) VALUES ($1, $2, $3, $4) RETURNING id",
+                        self.guild_id, title, amount, interaction.user.id
+                    )
+                    for uid in participating_rms:
+                        if uid != payer_id:
+                            await conn.execute(
+                                "INSERT INTO ledger (guild_id, event_id, debtor_id, creditor_id, amount) VALUES ($1, $2, $3, $4, $5)",
+                                self.guild_id, eid, uid, payer_id, split
+                            )
+                await interaction.followup.send(f"🎉 已成功記帳：{title} (${amount})！")
+                
+            for child in self.children:
+                child.disabled = True
+            await interaction.message.edit(view=self)
             
-            async with db.transaction() as conn:
-                eid = await conn.fetchval(
-                    "INSERT INTO expense_events (guild_id, description, total_amount, created_by) VALUES ($1, $2, $3, $4) RETURNING id",
-                    self.guild_id, title, amount, interaction.user.id
-                )
-                for uid in participating_rms:
-                    if uid != payer_id:
-                        await conn.execute(
-                            "INSERT INTO ledger (guild_id, event_id, debtor_id, creditor_id, amount) VALUES ($1, $2, $3, $4, $5)",
-                            self.guild_id, eid, uid, payer_id, split
-                        )
-            await interaction.followup.send(f"🎉 已成功記帳：{title} (${amount})！")
-            
-        for child in self.children:
-            child.disabled = True
-        await interaction.message.edit(view=self)
+        except Exception as e:
+            # 🛡️ 如果發生錯誤，回報在頻道上而不是讓按鈕卡死
+            await interaction.followup.send(f"❌ 寫入資料庫失敗：{e}")
 
     @discord.ui.button(label="❌ 取消", style=discord.ButtonStyle.red)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -128,7 +137,15 @@ class AIAgentCog(commands.Cog):
             try:
                 action_data = json.loads(json_str)
                 if action_data.get("action") == "expense":
-                    payer_mention = f"<@{action_data['payer_id']}>"
+                    
+                    # 🛡️ 雙重防呆：確保介面上顯示的墊款人也不會是 <@None>
+                    payer_id = action_data.get('payer_id')
+                    if not payer_id or payer_id == "None":
+                        payer_id = message.author.id
+                        action_data['payer_id'] = payer_id  # 同步更新丟給確認按鈕的資料
+                        
+                    payer_mention = f"<@{payer_id}>"
+                    
                     embed = discord.Embed(title="🤖 AI 偵測到記帳指令", description="請問是否要執行以下記帳？", color=discord.Color.gold())
                     embed.add_field(name="項目", value=action_data['title'], inline=True)
                     embed.add_field(name="金額", value=f"${action_data['amount']}", inline=True)
