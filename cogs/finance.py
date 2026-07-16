@@ -21,13 +21,6 @@ class FinanceCog(commands.Cog):
         participants="請標記所有要平分的人 (例如: @A @B)",
         payer="代墊人 (預設為指令發起人)"
     )
-    @finance.command(name="expense", description="新增分攤消費 (僅由標記的人平分)")
-    @app_commands.describe(
-        title="消費名稱", 
-        amount="總金額", 
-        participants="請標記所有要平分的人 (例如: @A @B)",
-        payer="代墊人 (預設為指令發起人)"
-    )
     async def expense(
         self, 
         interaction: discord.Interaction, 
