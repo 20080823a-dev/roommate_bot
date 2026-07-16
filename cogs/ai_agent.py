@@ -28,10 +28,12 @@ class AIActionConfirmView(discord.ui.View):
                 title = self.action_data['title']
                 amount = self.action_data['amount']
                 
-                # 🛡️ 防呆機制：如果 AI 沒給 ID，預設為點擊按鈕的使用者
+                # 🛡️ 防呆機制與型別轉換：確保 ID 絕對是整數
                 payer_id = self.action_data.get('payer_id')
-                if not payer_id or payer_id == "None":
+                if not payer_id or str(payer_id).lower() == "none":
                     payer_id = interaction.user.id
+                else:
+                    payer_id = int(payer_id)  # 👈 關鍵修復：強制將 AI 給的字串轉為整數 (int)
                 
                 rms = await db.fetch("SELECT user_id FROM roommates WHERE guild_id = $1", self.guild_id)
                 participating_rms = [r['user_id'] for r in rms]
