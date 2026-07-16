@@ -99,14 +99,27 @@ class AIActionConfirmView(discord.ui.View):
                     return await interaction.followup.send(f"❌ 資料庫還款寫入失敗：{db_err}")
 
             elif self.action_data['action'] == 'shopping':
-                item = self.action_data['item']
+                item_name = self.action_data.get('item_name', '未知物品')
+                quantity = self.action_data.get('quantity', '')
                 try:
                     async with db.transaction() as conn:
-                        await conn.execute(
-                            "INSERT INTO shopping_list (guild_id, item_name, added_by) VALUES ($1, $2, $3)",
-                            self.guild_id, item, interaction.user.id
+                        # 寫入資料庫並取得 UUID，用來產生 UI 按鈕
+                        item_id = await conn.fetchval(
+                            """
+                            INSERT INTO shopping_items (guild_id, item_name, quantity, added_by) 
+                            VALUES ($1, $2, $3, $4) RETURNING id
+                            """,
+                            self.guild_id, item_name, quantity, interaction.user.id
                         )
-                    await interaction.followup.send(f"🛒 已成功將 **{item}** 加入採購清單！")
+                        
+                    qty_text = f" ({quantity})" if quantity else ""
+                    
+                    # 匯入 PurchaseButton，使 AI 也支援生成購買按鈕
+                    from cogs.shopping import PurchaseButton
+                    view = discord.ui.View(timeout=None)
+                    view.add_item(PurchaseButton(str(item_id), item_name))
+                    
+                    await interaction.followup.send(f"🛒 已成功將 **{item_name}**{qty_text} 加入採購清單！\n*(點擊下方按鈕即可領取購買任務)*", view=view)
                 except Exception as db_err:
                     await interaction.followup.send(f"❌ 採購清單寫入失敗：{db_err}")
                 
@@ -153,7 +166,7 @@ class AIAgentCog(commands.Cog):
         3. 【還款 / 給錢】：如果是 A 還錢給 B (例如「@軒 還我 500」)，回傳 JSON：
            {{"action": "repay", "amount": 總金額整數, "payer_id": 付錢方(還款人)的真實ID, "receiver_id": 收錢方的真實ID}}
         4. 【採購清單】：如果用戶想要買東西或將物品加入採買清單 (例如「我要買衛生紙5串」)，回傳 JSON：
-           {{"action": "shopping", "item": "物品名稱與數量(如:衛生紙5串)"}}
+           {{"action": "shopping", "item_name": "物品名稱(如:衛生紙)", "quantity": "數量(如:5串，若無則填空字串)"}}
         5. 嚴格輸出純 JSON，不可有其他文字與 markdown 符號。若是閒聊則自然回覆中文，不要輸出 JSON。
         """
 
@@ -225,8 +238,12 @@ class AIAgentCog(commands.Cog):
                     return
 
                 elif action_data.get("action") == "shopping":
+                    item_name = action_data.get('item_name', '未知物品')
+                    quantity = action_data.get('quantity', '')
+                    qty_text = f" ({quantity})" if quantity else ""
+                    
                     embed = discord.Embed(title="🛒 AI 偵測到採購需求", description="請問是否加入採購清單？", color=discord.Color.blue())
-                    embed.add_field(name="採買項目", value=action_data['item'], inline=False)
+                    embed.add_field(name="採買項目", value=f"{item_name}{qty_text}", inline=False)
                     
                     view = AIActionConfirmView(action_data, message.guild.id)
                     await message.reply(embed=embed, view=view)
