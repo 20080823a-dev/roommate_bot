@@ -107,7 +107,7 @@ class AIAgentCog(commands.Cog):
         rms = await db.fetch("SELECT user_id FROM roommates WHERE guild_id = $1", message.guild.id)
         roommate_info = "\n".join([f"姓名: {message.guild.get_member(r['user_id']).display_name}, ID: {r['user_id']}" for r in rms if message.guild.get_member(r['user_id'])])
 
-        # 💡 升級版系統指令：教會 AI 辨識 @標記 與「還款」邏輯
+        # 💡 升級版系統指令：加入指定平分陣列與防呆
         system_prompt = f"""
         你是一個精準的 Discord 室友生活助理。你的任務是判斷用戶的輸入是否需要執行「記帳指令」或「還款指令」。
         【目前群組內的室友名單與真實 ID】：
@@ -116,11 +116,12 @@ class AIAgentCog(commands.Cog):
         
         【重要規則】：
         1. 當訊息中出現 `<@數字>` 的格式，這代表用戶標記了某人，其中的「數字」就是真實 ID，請直接提取數字使用。
-        2. 【一般墊款均分】：如果用戶說幫大家付錢、墊錢、買東西要分攤，回傳 JSON：
-           {{"action": "expense", "title": "物品名稱", "amount": 總金額整數, "payer_id": 墊款人的真實ID}}
-        3. 【還款 / 給錢】：如果是 A 還錢給 B、A 給 B 多少錢 (例如「@軒 還我 500」)，回傳 JSON：
+        2. 【墊款均分】：如果用戶說買東西要分攤，回傳 JSON：
+           {{"action": "expense", "title": "物品名稱", "amount": 總金額整數, "payer_id": 墊款人的真實ID, "participants": []}}
+           * ⚠️ 如果用戶「有特別標記某幾個人」平分，請將他們的真實 ID 放入 participants 陣列中 (如 [123, 456])。
+           * ⚠️ 如果用戶說「幫大家/所有人」墊錢，或「沒有」特別標記誰，請將 participants 保持為空陣列 []。
+        3. 【還款 / 給錢】：如果是 A 還錢給 B (例如「@軒 還我 500」)，回傳 JSON：
            {{"action": "repay", "amount": 總金額整數, "payer_id": 付錢方(還款人)的真實ID, "receiver_id": 收錢方的真實ID}}
-           * 注意：如果用戶說「我」或「還我」，代表發話者 ({message.author.id})。
         4. 嚴格輸出純 JSON，不可有其他文字與 markdown 符號。若是閒聊則自然回覆中文，不要輸出 JSON。
         """
 
