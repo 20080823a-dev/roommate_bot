@@ -3,9 +3,10 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import uuid
+import re
 from database.db_manager import db
 from utils.debt_calc import calculate_minimum_transactions
-from utils.ui import PaginationView  # 匯入我們剛剛寫好的分頁元件
+from utils.ui import PaginationView
 
 class FinanceCog(commands.Cog):
     def __init__(self, bot):
@@ -13,40 +14,52 @@ class FinanceCog(commands.Cog):
     
     finance = app_commands.Group(name="finance", description="記帳與費用分攤指令")
 
-    @finance.command(name="expense", description="新增分攤消費 (全體均分，餘數付款人吸收)")
-    @app_commands.describe(title="消費名稱", amount="總金額", payer="先墊錢的人", exclude="不參與分攤的人(可選)")
-    async def expense(self, interaction: discord.Interaction, title: str, amount: int, payer: discord.Member, exclude: discord.Member = None):
+    @finance.command(name="expense", description="新增分攤消費 (僅由標記的人平分)")
+    @app_commands.describe(
+        title="消費名稱", 
+        amount="總金額", 
+        participants="請標記所有要平分的人 (例如: @A @B)",
+        payer="代墊人 (預設為指令發起人)"
+    )
+    async def expense(
+        self, 
+        interaction: discord.Interaction, 
+        title: str, 
+        amount: int, 
+        participants: str,
+        payer: discord.Member = None
+    ):
         await interaction.response.defer(ephemeral=False)
         gid = interaction.guild_id
+        payer_id = payer.id if payer else interaction.user.id
         
-        rms = await db.fetch("SELECT user_id FROM roommates WHERE guild_id = $1", gid)
-        if not rms:
-            return await interaction.followup.send(embed=discord.Embed(description="❌ 尚未登記室友。", color=discord.Color.red()))
+        # 1. 萃取字串中的所有 Discord ID，並去除重複
+        tagged_ids = [int(uid) for uid in re.findall(r'<@!?(\d+)>', participants)]
+        participating_rms = list(set(tagged_ids)) 
         
-        participating_rms = [r['user_id'] for r in rms if not (exclude and r['user_id'] == exclude.id)]
         if not participating_rms:
-            return await interaction.followup.send(embed=discord.Embed(description="❌ 排除後沒有人可以分攤了。", color=discord.Color.red()))
+            return await interaction.followup.send(embed=discord.Embed(description="❌ 錯誤：請在 participants 欄位中 @標記 至少一位成員！", color=discord.Color.red()))
 
         split = amount // len(participating_rms)
         
+        # 2. 寫入資料庫
         async with db.transaction() as conn:
             eid = await conn.fetchval(
                 "INSERT INTO expense_events (guild_id, description, total_amount, created_by) VALUES ($1, $2, $3, $4) RETURNING id",
                 gid, title, amount, interaction.user.id
             )
             for uid in participating_rms:
-                if uid != payer.id:
+                if uid != payer_id:
                     await conn.execute(
                         "INSERT INTO ledger (guild_id, event_id, debtor_id, creditor_id, amount) VALUES ($1, $2, $3, $4, $5)",
-                        gid, eid, uid, payer.id, split
+                        gid, eid, uid, payer_id, split
                     )
         
-        exclude_text = f" (已排除 <@{exclude.id}>)" if exclude else ""
         embed = discord.Embed(title="🧾 新增消費成功", color=discord.Color.green())
         embed.add_field(name="項目", value=title, inline=True)
         embed.add_field(name="總金額", value=f"${amount}", inline=True)
-        embed.add_field(name="代墊人", value=f"<@{payer.id}>{exclude_text}", inline=False)
-        embed.add_field(name="分攤結果", value=f"其他人各需給付 **${split}**", inline=False)
+        embed.add_field(name="代墊人", value=f"<@{payer_id}>", inline=False)
+        embed.add_field(name="分攤結果", value=f"共 {len(participating_rms)} 人參與平分，其他人各需給付代墊人 **${split}**", inline=False)
         await interaction.followup.send(embed=embed)
 
     @finance.command(name="pay", description="資金轉交 (還錢給墊款人)")
@@ -92,7 +105,6 @@ class FinanceCog(commands.Cog):
     async def history(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=False)
         
-        # 擴大查詢範圍到 50 筆
         query = """
         WITH RecentEvents AS (
             SELECT id, description, total_amount, created_by, created_at
@@ -112,7 +124,6 @@ class FinanceCog(commands.Cog):
         if not records:
             return await interaction.followup.send(embed=discord.Embed(description="目前沒有任何記帳紀錄。", color=discord.Color.light_gray()))
 
-        # 整併資料
         events = {}
         event_order = []
         for r in records:
@@ -130,7 +141,6 @@ class FinanceCog(commands.Cog):
             if r['debtor_id'] and r['creditor_id'] and r['debt_amount']:
                 events[eid]['details'].append(f"↳ <@{r['debtor_id']}> 給 <@{r['creditor_id']}> : `${r['debt_amount']}`")
 
-        # 每 5 筆紀錄拆成一頁
         ITEMS_PER_PAGE = 5
         pages_data = [event_order[i:i + ITEMS_PER_PAGE] for i in range(0, len(event_order), ITEMS_PER_PAGE)]
         
@@ -149,7 +159,6 @@ class FinanceCog(commands.Cog):
                 )
             embeds.append(embed)
 
-        # 啟動分頁系統
         if len(embeds) > 1:
             view = PaginationView(embeds)
             await interaction.followup.send(embed=embeds[0], view=view)
