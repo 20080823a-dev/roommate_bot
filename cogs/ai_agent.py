@@ -3,7 +3,6 @@ import discord
 from discord.ext import commands
 import google.generativeai as genai
 import json
-import re
 import config
 from database.db_manager import db
 import logging
@@ -61,14 +60,24 @@ class AIActionConfirmView(discord.ui.View):
                             "INSERT INTO expense_events (guild_id, description, total_amount, created_by) VALUES ($1, $2, $3, $4) RETURNING id",
                             self.guild_id, title, amount, interaction.user.id
                         )
-                        for uid in participating_rms:
-                            if uid != payer_id:
-                                await conn.execute(
-                                    "INSERT INTO ledger (guild_id, event_id, debtor_id, creditor_id, amount) VALUES ($1, $2, $3, $4, $5)",
-                                    self.guild_id, eid, uid, payer_id, split
-                                )
+                        
+                        # 💡 穩定性優化：改用 executemany 批次寫入 ledger，避免 N+1 查詢與連線池阻塞
+                        insert_data = [
+                            (self.guild_id, eid, uid, payer_id, split)
+                            for uid in participating_rms if uid != payer_id
+                        ]
+                        if insert_data:
+                            await conn.executemany(
+                                """
+                                INSERT INTO ledger (guild_id, event_id, debtor_id, creditor_id, amount) 
+                                VALUES ($1, $2, $3, $4, $5)
+                                """,
+                                insert_data
+                            )
+                            
                     await interaction.followup.send(f"🎉 已成功記帳：{title} (${amount})，共 {len(participating_rms)} 人平分！")
                 except Exception as db_err:
+                    logger.error(f"記帳寫入失敗: {db_err}", exc_info=db_err)
                     return await interaction.followup.send(f"❌ 資料庫寫入失敗：{db_err}")
             
             elif self.action_data['action'] == 'repay':
@@ -96,6 +105,7 @@ class AIActionConfirmView(discord.ui.View):
                         )
                     await interaction.followup.send(f"💸 已成功記錄還款：<@{payer_id}> 還給 <@{receiver_id}> ${amount}！")
                 except Exception as db_err:
+                    logger.error(f"還款寫入失敗: {db_err}", exc_info=db_err)
                     return await interaction.followup.send(f"❌ 資料庫還款寫入失敗：{db_err}")
 
             elif self.action_data['action'] == 'shopping':
@@ -103,7 +113,6 @@ class AIActionConfirmView(discord.ui.View):
                 quantity = self.action_data.get('quantity', '')
                 try:
                     async with db.transaction() as conn:
-                        # 寫入資料庫並取得 UUID，用來產生 UI 按鈕
                         item_id = await conn.fetchval(
                             """
                             INSERT INTO shopping_items (guild_id, item_name, quantity, added_by) 
@@ -114,13 +123,13 @@ class AIActionConfirmView(discord.ui.View):
                         
                     qty_text = f" ({quantity})" if quantity else ""
                     
-                    # 匯入 PurchaseButton，使 AI 也支援生成購買按鈕
                     from cogs.shopping import PurchaseButton
                     view = discord.ui.View(timeout=None)
                     view.add_item(PurchaseButton(str(item_id), item_name))
                     
                     await interaction.followup.send(f"🛒 已成功將 **{item_name}**{qty_text} 加入採購清單！\n*(點擊下方按鈕即可領取購買任務)*", view=view)
                 except Exception as db_err:
+                    logger.error(f"採購清單寫入失敗: {db_err}", exc_info=db_err)
                     await interaction.followup.send(f"❌ 採購清單寫入失敗：{db_err}")
                 
             for child in self.children:
@@ -128,6 +137,7 @@ class AIActionConfirmView(discord.ui.View):
             await interaction.message.edit(view=self)
             
         except Exception as e:
+            logger.error(f"系統錯誤: {e}", exc_info=e)
             await interaction.followup.send(f"❌ 發生未預期的系統錯誤：{e}")
 
     @discord.ui.button(label="❌ 取消", style=discord.ButtonStyle.red)
@@ -167,7 +177,7 @@ class AIAgentCog(commands.Cog):
            {{"action": "repay", "amount": 總金額整數, "payer_id": 付錢方(還款人)的真實ID, "receiver_id": 收錢方的真實ID}}
         4. 【採購清單】：如果用戶想要買東西或將物品加入採買清單 (例如「我要買衛生紙5串」)，回傳 JSON：
            {{"action": "shopping", "item_name": "物品名稱(如:衛生紙)", "quantity": "數量(如:5串，若無則填空字串)"}}
-        5. 嚴格輸出純 JSON，不可有其他文字與 markdown 符號。若是閒聊則自然回覆中文，不要輸出 JSON。
+        5. 若是閒聊則自然回覆中文，不要輸出任何 JSON 欄位。
         """
 
         fallback_models = [
@@ -185,9 +195,13 @@ class AIAgentCog(commands.Cog):
                         model_name=target_model,
                         system_instruction=system_prompt
                     )
+                    # 💡 穩定性優化：啟用 Gemini 官方原生 JSON 結構化輸出模式
                     response = temp_model.generate_content(
                         message.content,
-                        generation_config=genai.types.GenerationConfig(temperature=0.1)
+                        generation_config=genai.types.GenerationConfig(
+                            temperature=0.1,
+                            response_mime_type="application/json"
+                        )
                     )
                     reply = response.text.strip()
                     break
@@ -197,11 +211,15 @@ class AIAgentCog(commands.Cog):
                     
             if not reply:
                 return await message.reply("❌ AI 發生錯誤，所有備用模型均已達到限制，請稍後再試！")
-                
-            json_str = re.sub(r'```json\n|\n```|```', '', reply).strip()
             
             try:
-                action_data = json.loads(json_str)
+                # 💡 穩定性優化：移除了 Regex (re.sub) 清理步驟，直接解析乾淨的 JSON 字串
+                action_data = json.loads(reply)
+                
+                # 防呆：確保解析出來的是 dict 且包含 action 欄位，否則視為普通閒聊字串
+                if not isinstance(action_data, dict) or "action" not in action_data:
+                    await message.reply(reply if isinstance(action_data, str) else str(action_data))
+                    return
                 
                 if action_data.get("action") == "expense":
                     payer_id = action_data.get('payer_id')
