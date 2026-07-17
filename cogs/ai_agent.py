@@ -24,7 +24,7 @@ class AIActionConfirmView(discord.ui.View):
         
         try:
             if self.action_data['action'] == 'expense':
-                title = self.action_data['title']
+                title = self.action_data.get('title', '未命名項目')
                 amount = int(self.action_data.get('amount', 0))
                 
                 if amount <= 0:
@@ -61,7 +61,6 @@ class AIActionConfirmView(discord.ui.View):
                             self.guild_id, title, amount, interaction.user.id
                         )
                         
-                        # 💡 穩定性優化：改用 executemany 批次寫入 ledger，避免 N+1 查詢與連線池阻塞
                         insert_data = [
                             (self.guild_id, eid, uid, payer_id, split)
                             for uid in participating_rms if uid != payer_id
@@ -162,23 +161,40 @@ class AIAgentCog(commands.Cog):
         roommate_info = "\n".join([f"姓名: {message.guild.get_member(r['user_id']).display_name if message.guild.get_member(r['user_id']) else r['user_id']}, ID: {r['user_id']}" for r in rms])
 
         system_prompt = f"""
-        你是一個精準的 Discord 室友生活助理。你的任務是判斷用戶的輸入是否需要執行「記帳指令」、「還款指令」或「採購指令」。
-        【目前群組內的室友名單與真實 ID】：
+        你是一個精準的 Discord 室友生活助理。你的任務是判斷用戶的輸入是否需要執行「記帳指令」、「還款指令」、「採購指令」或是「純粹閒聊」。
+        
+        <roommate_list>
         {roommate_info}
+        </roommate_list>
+        
+        <context>
         發話者 (用戶自己) 的真實 ID 是: {message.author.id}
+        </context>
         
         【重要規則】：
-        1. 當訊息中出現 `<@數字>` 的格式，這代表用戶標記了某人，其中的「數字」就是真實 ID，請直接提取數字使用。
-        2. 【墊款均分】：如果用戶說買東西要分攤，回傳 JSON：
-           {{"action": "expense", "title": "物品名稱", "amount": 總金額整數, "payer_id": 墊款人的真實ID, "participants": []}}
-           * ⚠️ 如果用戶「有特別標記某幾個人」平分，請將他們的真實 ID 放入 participants 陣列中 (如 [123, 456])。
-           * ⚠️ 如果用戶說「幫大家/所有人」墊錢，或「沒有」特別標記誰，請將 participants 保持為空陣列 []。
-        3. 【還款 / 給錢】：如果是 A 還錢給 B (例如「@軒 還我 500」)，回傳 JSON：
-           {{"action": "repay", "amount": 總金額整數, "payer_id": 付錢方(還款人)的真實ID, "receiver_id": 收錢方的真實ID}}
-        4. 【採購清單】：如果用戶想要買東西或將物品加入採買清單 (例如「我要買衛生紙5串」)，回傳 JSON：
-           {{"action": "shopping", "item_name": "物品名稱(如:衛生紙)", "quantity": "數量(如:5串，若無則填空字串)"}}
-        5. 若是閒聊則自然回覆中文，不要輸出任何 JSON 欄位。
+        1. 當訊息中出現 `<@數字>` 的格式，請直接提取其中的數字作為真實 ID 使用。
+        2. 【墊款均分】：如果用戶說買東西要分攤，action 設為 "expense" 並填寫 title, amount, payer_id。若指定特定對象，將他們放入 participants；若無指定或幫所有人墊，保持空陣列 []。
+        3. 【還款 / 給錢】：如果是 A 還錢給 B，action 設為 "repay" 並填寫 amount, payer_id, receiver_id。
+        4. 【採購清單】：想將物品加入採買清單，action 設為 "shopping" 並填寫 item_name, quantity。
+        5. 【閒聊與對話】：若是上述功能以外的對話，action 請設為 "chat"，並將你的回應文字放在 reply 欄位。
         """
+
+        # 宣告強型別的 JSON Schema，防止模型隨意輸出文字型金額或欄位
+        response_schema = {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["expense", "repay", "shopping", "chat"]},
+                "title": {"type": "string", "description": "記帳項目名稱"},
+                "amount": {"type": "integer", "description": "總金額(只能是整數)"},
+                "payer_id": {"type": "integer", "description": "墊款人或還款人的 ID"},
+                "participants": {"type": "array", "items": {"type": "integer"}, "description": "參與平分的人"},
+                "receiver_id": {"type": "integer", "description": "收錢方的 ID"},
+                "item_name": {"type": "string", "description": "採購的物品名稱"},
+                "quantity": {"type": "string", "description": "採購的數量"},
+                "reply": {"type": "string", "description": "閒聊時的回應文字"}
+            },
+            "required": ["action"]
+        }
 
         fallback_models = [
             'gemini-3.1-flash-lite',
@@ -195,12 +211,13 @@ class AIAgentCog(commands.Cog):
                         model_name=target_model,
                         system_instruction=system_prompt
                     )
-                    # 💡 穩定性優化：啟用 Gemini 官方原生 JSON 結構化輸出模式
+                    
                     response = temp_model.generate_content(
                         message.content,
                         generation_config=genai.types.GenerationConfig(
                             temperature=0.1,
-                            response_mime_type="application/json"
+                            response_mime_type="application/json",
+                            response_schema=response_schema
                         )
                     )
                     reply = response.text.strip()
@@ -213,13 +230,12 @@ class AIAgentCog(commands.Cog):
                 return await message.reply("❌ AI 發生錯誤，所有備用模型均已達到限制，請稍後再試！")
             
             try:
-                # 💡 穩定性優化：移除了 Regex (re.sub) 清理步驟，直接解析乾淨的 JSON 字串
                 action_data = json.loads(reply)
                 
-                # 防呆：確保解析出來的是 dict 且包含 action 欄位，否則視為普通閒聊字串
-                if not isinstance(action_data, dict) or "action" not in action_data:
-                    await message.reply(reply if isinstance(action_data, str) else str(action_data))
-                    return
+                # 攔截並直接回應閒聊模式
+                if action_data.get("action") == "chat":
+                    reply_text = action_data.get("reply", "我聽不懂你的意思，可以再說清楚一點嗎？")
+                    return await message.reply(reply_text)
                 
                 if action_data.get("action") == "expense":
                     payer_id = action_data.get('payer_id')
@@ -228,8 +244,8 @@ class AIAgentCog(commands.Cog):
                         action_data['payer_id'] = payer_id
                         
                     embed = discord.Embed(title="🤖 AI 偵測到記帳需求", description="請問是否要執行以下記帳？", color=discord.Color.gold())
-                    embed.add_field(name="項目", value=action_data['title'], inline=True)
-                    embed.add_field(name="金額", value=f"${action_data['amount']}", inline=True)
+                    embed.add_field(name="項目", value=action_data.get('title', '未知'), inline=True)
+                    embed.add_field(name="金額", value=f"${action_data.get('amount', 0)}", inline=True)
                     embed.add_field(name="墊款人", value=f"<@{action_data['payer_id']}>", inline=False)
                     
                     view = AIActionConfirmView(action_data, message.guild.id)
@@ -247,7 +263,7 @@ class AIAgentCog(commands.Cog):
                     action_data['receiver_id'] = receiver_id
                     
                     embed = discord.Embed(title="💸 AI 偵測到還款指令", description="請問是否要執行以下還款紀錄？", color=discord.Color.green())
-                    embed.add_field(name="金額", value=f"${action_data['amount']}", inline=False)
+                    embed.add_field(name="金額", value=f"${action_data.get('amount', 0)}", inline=False)
                     embed.add_field(name="還款人 (付錢方)", value=f"<@{action_data['payer_id']}>", inline=True)
                     embed.add_field(name="收款人 (收錢方)", value=f"<@{action_data['receiver_id']}>", inline=True)
                     
@@ -268,7 +284,7 @@ class AIAgentCog(commands.Cog):
                     return
                     
             except json.JSONDecodeError:
-                await message.reply(reply)
+                await message.reply("❌ AI 回傳的資料格式解析失敗。")
 
 async def setup(bot):
     await bot.add_cog(AIAgentCog(bot))
